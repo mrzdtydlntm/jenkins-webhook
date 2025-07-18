@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -17,31 +18,11 @@ import (
 
 // Jenkins webhook payload structures
 type JenkinsWebhook struct {
-	Name        string `json:"name"`
-	URL         string `json:"url"`
-	Build       Build  `json:"build"`
-	DisplayName string `json:"displayName"`
-}
-
-type Build struct {
-	FullDisplayName string         `json:"fullDisplayName"`
-	Number          int            `json:"number"`
-	QueueID         int            `json:"queueId"`
-	Timestamp       int64          `json:"timestamp"`
-	StartTimeMillis int64          `json:"startTimeMillis"`
-	Result          string         `json:"result"`
-	Duration        int64          `json:"duration"`
-	URL             string         `json:"url"`
-	Builtby         []any          `json:"builtby"`
-	Actions         []any          `json:"actions"`
-	Parameters      map[string]any `json:"parameters"`
-	Cause           string         `json:"cause"`
-	ChangeSets      []any          `json:"changeSets"`
-	Culprits        []any          `json:"culprits"`
-	NextBuild       any            `json:"nextBuild"`
-	PreviousBuild   any            `json:"previousBuild"`
-	Phase           string         `json:"phase"`
-	Status          string         `json:"status"`
+	BuildName   string `json:"buildName"`
+	BuildUrl    string `json:"buildUrl"`
+	BuildVars   string `json:"buildVars"`
+	Event       string `json:"event"`
+	ProjectName string `json:"projectName"`
 }
 
 // Discord webhook payload structures
@@ -97,8 +78,8 @@ func (w *WebhookHandler) HandleJenkinsWebhook(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid payload"})
 	}
 
-	log.Printf("Received Jenkins webhook: %s - Build #%d - %s",
-		payload.Name, payload.Build.Number, payload.Build.Status)
+	log.Printf("Received Jenkins webhook: %s - %s - %s",
+		payload.ProjectName, payload.BuildName, payload.Event)
 
 	discordPayload := w.convertToDiscordPayload(payload)
 
@@ -111,52 +92,47 @@ func (w *WebhookHandler) HandleJenkinsWebhook(c echo.Context) error {
 }
 
 func (w *WebhookHandler) convertToDiscordPayload(jenkins JenkinsWebhook) DiscordWebhook {
-	// Determine color based on build result/status
-	color := w.getStatusColor(jenkins.Build.Result, jenkins.Build.Status)
+	// Determine color based on event status
+	color := w.getEventColor(jenkins.Event)
 
-	// Format timestamp
-	timestamp := time.Unix(jenkins.Build.Timestamp/1000, 0).Format(time.RFC3339)
+	// Current timestamp
+	timestamp := time.Now().Format(time.RFC3339)
 
-	// Calculate duration
-	duration := w.formatDuration(jenkins.Build.Duration)
+	// Parse build variables
+	buildVarsFormatted := w.formatBuildVars(jenkins.BuildVars)
 
 	// Create embed fields
 	fields := []DiscordEmbedField{
 		{
-			Name:   "Build Number",
-			Value:  fmt.Sprintf("#%d", jenkins.Build.Number),
+			Name:   "Build",
+			Value:  jenkins.BuildName,
 			Inline: true,
 		},
 		{
 			Name:   "Status",
-			Value:  w.getStatusText(jenkins.Build.Result, jenkins.Build.Status),
+			Value:  w.getEventText(jenkins.Event),
 			Inline: true,
 		},
 		{
-			Name:   "Duration",
-			Value:  duration,
-			Inline: true,
-		},
-		{
-			Name:   "Phase",
-			Value:  jenkins.Build.Phase,
+			Name:   "Project",
+			Value:  jenkins.ProjectName,
 			Inline: true,
 		},
 	}
 
-	// Add cause if available
-	if jenkins.Build.Cause != "" {
+	// Add build variables if available
+	if buildVarsFormatted != "" {
 		fields = append(fields, DiscordEmbedField{
-			Name:   "Cause",
-			Value:  jenkins.Build.Cause,
+			Name:   "Build Variables",
+			Value:  buildVarsFormatted,
 			Inline: false,
 		})
 	}
 
 	embed := DiscordEmbed{
-		Title:       fmt.Sprintf("%s - Build #%d", jenkins.DisplayName, jenkins.Build.Number),
-		Description: jenkins.Build.FullDisplayName,
-		URL:         jenkins.Build.URL,
+		Title:       fmt.Sprintf("%s - %s", jenkins.ProjectName, jenkins.BuildName),
+		Description: fmt.Sprintf("Build %s", jenkins.Event),
+		URL:         jenkins.BuildUrl,
 		Color:       color,
 		Fields:      fields,
 		Timestamp:   timestamp,
@@ -170,70 +146,63 @@ func (w *WebhookHandler) convertToDiscordPayload(jenkins JenkinsWebhook) Discord
 	}
 }
 
-func (w *WebhookHandler) getStatusColor(result, status string) int {
-	// Check result first, then status
-	switch result {
-	case "SUCCESS":
+func (w *WebhookHandler) getEventColor(event string) int {
+	switch event {
+	case "success":
 		return 0x00FF00 // Green
-	case "FAILURE":
+	case "failure", "failed":
 		return 0xFF0000 // Red
-	case "UNSTABLE":
+	case "unstable":
 		return 0xFFA500 // Orange
-	case "ABORTED":
+	case "aborted":
 		return 0x808080 // Gray
-	}
-
-	// If no result, check status
-	switch status {
-	case "STARTED":
+	case "started":
 		return 0x0099FF // Blue
-	case "COMPLETED":
-		return 0x00FF00 // Green
 	default:
 		return 0x808080 // Gray
 	}
 }
 
-func (w *WebhookHandler) getStatusText(result, status string) string {
-	if result != "" {
-		switch result {
-		case "SUCCESS":
-			return "✅ Success"
-		case "FAILURE":
-			return "❌ Failure"
-		case "UNSTABLE":
-			return "⚠️ Unstable"
-		case "ABORTED":
-			return "🛑 Aborted"
-		default:
-			return result
+func (w *WebhookHandler) getEventText(event string) string {
+	switch event {
+	case "success":
+		return "✅ Success"
+	case "failure", "failed":
+		return "❌ Failure"
+	case "unstable":
+		return "⚠️ Unstable"
+	case "aborted":
+		return "🛑 Aborted"
+	case "started":
+		return "🔄 Started"
+	default:
+		return event
+	}
+}
+
+func (w *WebhookHandler) formatBuildVars(buildVars string) string {
+	if buildVars == "" {
+		return ""
+	}
+
+	// Remove curly braces and format the variables
+	cleanVars := strings.Trim(buildVars, "{}")
+	if cleanVars == "" {
+		return ""
+	}
+
+	// Split by comma and format each variable
+	vars := strings.Split(cleanVars, ", ")
+	var formatted []string
+
+	for _, v := range vars {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) == 2 {
+			formatted = append(formatted, fmt.Sprintf("**%s**: %s", strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])))
 		}
 	}
 
-	switch status {
-	case "STARTED":
-		return "🔄 Started"
-	case "COMPLETED":
-		return "✅ Completed"
-	default:
-		return status
-	}
-}
-
-func (w *WebhookHandler) formatDuration(duration int64) string {
-	if duration == 0 {
-		return "N/A"
-	}
-
-	d := time.Duration(duration) * time.Millisecond
-
-	if d.Hours() >= 1 {
-		return fmt.Sprintf("%.1fh", d.Hours())
-	} else if d.Minutes() >= 1 {
-		return fmt.Sprintf("%.1fm", d.Minutes())
-	} else {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
+	return strings.Join(formatted, "\n")
 }
 
 func (w *WebhookHandler) sendToDiscord(payload DiscordWebhook) error {
